@@ -242,6 +242,11 @@ class ClusterManager<T extends ClusterItem> {
     final LatLngBounds mapBounds = await GoogleMapsFlutterPlatform.instance
         .getVisibleRegion(mapId: _mapId!);
 
+    // Determine viewport characteristics
+    double latSpan = (mapBounds.northeast.latitude - mapBounds.southwest.latitude).abs();
+    double lngSpan = (mapBounds.northeast.longitude - mapBounds.southwest.longitude).abs();
+    
+    // Use these to create adaptive inflation
     late LatLngBounds inflatedBounds;
     if (clusterAlgorithm == ClusterAlgorithm.GEOHASH) {
       inflatedBounds = _inflateBounds(mapBounds);
@@ -249,14 +254,8 @@ class ClusterManager<T extends ClusterItem> {
       inflatedBounds = mapBounds;
     }
 
-    // Check if we're dealing with a small or large screen based on bounds span
-    double latSpan = (mapBounds.northeast.latitude - mapBounds.southwest.latitude).abs();
-    double lngSpan = (mapBounds.northeast.longitude - mapBounds.southwest.longitude).abs();
-    bool isSmallScreen = latSpan < 0.1 || lngSpan < 0.1;
-    bool isUltraWideScreen = lngSpan > 90;
-    
-    // Use more efficient filtering with potentially better performance
-    List<T> visibleItems = _getVisibleItems(items, inflatedBounds, isUltraWideScreen, isSmallScreen);
+    // Get appropriate visible items using adaptive filtering
+    List<T> visibleItems = _getAdaptiveVisibleItems(items, inflatedBounds, mapBounds, latSpan, lngSpan);
 
     // If clustering is disabled, or we're at a high zoom level, return individual markers
     if (!enableClustering || (stopClusteringZoom != null && _zoom >= stopClusteringZoom!))
@@ -276,92 +275,139 @@ class ClusterManager<T extends ClusterItem> {
     return markers;
   }
   
-  List<T> _getVisibleItems(Iterable<T> allItems, LatLngBounds bounds, bool isUltraWideScreen, bool isSmallScreen) {
-    // For small screens, be more inclusive to ensure clusters are visible
-    if (isSmallScreen) {
-      // For very small screens, include all items within a larger region
-      // First filter by latitude with extended bounds
-      double latExtension = 0.3; // Extend latitude bounds significantly for small screens
-      final latFiltered = allItems.where((i) {
-        return i.location.latitude >= (bounds.southwest.latitude - latExtension) && 
-               i.location.latitude <= (bounds.northeast.latitude + latExtension);
-      });
-      
-      // Then filter by longitude with extended bounds
-      double lngExtension = 0.3; // Extend longitude bounds significantly for small screens
-      
-      // Handle date line crossing
-      if (bounds.northeast.longitude < bounds.southwest.longitude) {
-        return latFiltered.where((i) {
-          return i.location.longitude >= (bounds.southwest.longitude - lngExtension) || 
-                 i.location.longitude <= (bounds.northeast.longitude + lngExtension);
-        }).toList();
-      } else {
-        return latFiltered.where((i) {
-          return i.location.longitude >= (bounds.southwest.longitude - lngExtension) && 
-                 i.location.longitude <= (bounds.northeast.longitude + lngExtension);
-        }).toList();
-      }
-    }
-    // For ultra-wide screens, use optimized filtering
-    else if (isUltraWideScreen && kIsWeb) {
-      // Optimization: first do a rough filter based on latitude which is simpler
-      final latFiltered = allItems.where((i) {
-        return i.location.latitude >= bounds.southwest.latitude && 
-               i.location.latitude <= bounds.northeast.latitude;
-      });
-      
-      // Then filter by longitude which is more complex
-      if (bounds.northeast.longitude < bounds.southwest.longitude) {
-        // Date line is crossed
-        return latFiltered.where((i) {
-          return i.location.longitude >= bounds.southwest.longitude || 
-                 i.location.longitude <= bounds.northeast.longitude;
-        }).toList();
-      } else {
-        // Normal longitude check
-        return latFiltered.where((i) {
-          return i.location.longitude >= bounds.southwest.longitude && 
-                 i.location.longitude <= bounds.northeast.longitude;
-        }).toList();
-      }
+  List<T> _getAdaptiveVisibleItems(
+      Iterable<T> allItems, 
+      LatLngBounds inflatedBounds, 
+      LatLngBounds originalBounds,
+      double latSpan, 
+      double lngSpan) {
+    
+    // Create graduated extension factors based on viewport size
+    // This creates a continuous scale rather than discrete categories
+    double extensionFactor;
+    
+    if (latSpan < 0.05 || lngSpan < 0.05) {
+      // Very small screens - maximum extension
+      extensionFactor = 0.5;
+    } else if (latSpan < 0.1 || lngSpan < 0.1) {
+      // Small screens
+      extensionFactor = 0.35;
+    } else if (latSpan < 0.3 || lngSpan < 0.3) {
+      // Medium-small screens
+      extensionFactor = 0.25;
+    } else if (latSpan < 0.8 || lngSpan < 0.8) {
+      // Medium screens
+      extensionFactor = 0.15;
+    } else if (latSpan < 2.0 || lngSpan < 2.0) {
+      // Medium-large screens
+      extensionFactor = 0.1;
     } else {
-      // For normal screens, use the standard bounds.contains check
-      return allItems.where((i) => bounds.contains(i.location)).toList();
+      // Large screens - minimum extension
+      extensionFactor = 0.05;
+    }
+    
+    // Special handling for ultra-wide screens
+    bool isUltraWideScreen = lngSpan > 90;
+    
+    // Apply extension to bounds
+    LatLngBounds extendedBounds;
+    
+    if (!isUltraWideScreen) {
+      // Normal bounds
+      double latExtension = max(latSpan * extensionFactor, 0.05);
+      double lngExtension = max(lngSpan * extensionFactor, 0.05);
+      
+      extendedBounds = LatLngBounds(
+        southwest: LatLng(
+          inflatedBounds.southwest.latitude - latExtension,
+          inflatedBounds.southwest.longitude - lngExtension
+        ),
+        northeast: LatLng(
+          inflatedBounds.northeast.latitude + latExtension,
+          inflatedBounds.northeast.longitude + lngExtension
+        )
+      );
+    } else {
+      // Ultra-wide screen handling (date line crossing, etc.)
+      extendedBounds = inflatedBounds;
+    }
+    
+    // Two-stage filtering for better performance
+    // First filter by latitude (simpler calculation)
+    final latFiltered = allItems.where((i) {
+      return i.location.latitude >= extendedBounds.southwest.latitude && 
+             i.location.latitude <= extendedBounds.northeast.latitude;
+    });
+    
+    // Then filter by longitude - handle date line crossing if needed
+    if (extendedBounds.northeast.longitude < extendedBounds.southwest.longitude) {
+      // Date line crossed - need to check both sides
+      return latFiltered.where((i) {
+        return i.location.longitude >= extendedBounds.southwest.longitude || 
+               i.location.longitude <= extendedBounds.northeast.longitude;
+      }).toList();
+    } else {
+      // Standard longitude check
+      return latFiltered.where((i) {
+        return i.location.longitude >= extendedBounds.southwest.longitude && 
+               i.location.longitude <= extendedBounds.northeast.longitude;
+      }).toList();
     }
   }
 
   LatLngBounds _inflateBounds(LatLngBounds bounds) {
+    // Get the span of the visible region to determine appropriate inflation
+    double latSpan = (bounds.northeast.latitude - bounds.southwest.latitude).abs();
+    double lngSpan = (bounds.northeast.longitude - bounds.southwest.longitude).abs();
+    
+    // Calculate adaptive inflation factor based on the visible region size
+    // Smaller regions get more inflation, larger regions get less
+    double adaptiveExtraPercent = extraPercent;
+    
+    // Apply scaling based on screen size - increases inflation as viewport gets smaller
+    if (latSpan < 1.0 || lngSpan < 1.0) {
+      // For smaller viewports, increase inflation factor
+      double scaleFactor = 1.0 + (1.0 - min(latSpan, lngSpan)) * 2.0;
+      adaptiveExtraPercent = extraPercent * scaleFactor;
+    }
+    
     // Bounds that cross the date line expand compared to their difference with the date line
     double lng = 0;
     if (bounds.northeast.longitude < bounds.southwest.longitude) {
-      lng = extraPercent *
+      lng = adaptiveExtraPercent *
           ((180.0 - bounds.southwest.longitude) +
               (bounds.northeast.longitude + 180));
     } else {
-      lng = extraPercent *
+      lng = adaptiveExtraPercent *
           (bounds.northeast.longitude - bounds.southwest.longitude);
     }
 
-    // For smaller screens, ensure we have a minimum inflation amount
-    // This is critical for ensuring clusters are visible on small screens
-    double screenSizeFactor = kIsWeb ? 0.2 : 0.1;
-    double minLngInflation = screenSizeFactor; // Minimum longitude inflation
+    // Ensure minimum inflation regardless of screen size
+    // Gradually increase minimum for smaller viewports
+    double minFactor = 0.1;
+    if (latSpan < 0.5 || lngSpan < 0.5) {
+      minFactor = 0.2;
+    }
+    if (latSpan < 0.1 || lngSpan < 0.1) {
+      minFactor = 0.3;
+    }
+    
+    double minLngInflation = minFactor; // Minimum longitude inflation
     lng = lng < minLngInflation ? minLngInflation : lng;
 
     // Latitudes expanded beyond +/- 90 are automatically clamped by LatLng
-    double lat =
-        extraPercent * (bounds.northeast.latitude - bounds.southwest.latitude);
+    double lat = adaptiveExtraPercent * 
+        (bounds.northeast.latitude - bounds.southwest.latitude);
     
-    // For smaller screens, ensure a minimum inflation amount
-    double minLatInflation = screenSizeFactor; // Minimum latitude inflation
+    // Apply same minimum inflation to latitude
+    double minLatInflation = minFactor;
     lat = lat < minLatInflation ? minLatInflation : lat;
 
     double eLng = (bounds.northeast.longitude + lng).clamp(-_maxLng, _maxLng);
     double wLng = (bounds.southwest.longitude - lng).clamp(-_maxLng, _maxLng);
 
-    // Handle the case where the bounds are extremely wide
-    bool isExtremelyWide = (bounds.northeast.longitude - bounds.southwest.longitude) > 90;
+    // Handle date line crossing and extremely wide bounds
+    bool isExtremelyWide = lngSpan > 90;
     
     return LatLngBounds(
       southwest: LatLng(bounds.southwest.latitude - lat, wLng),

@@ -1,3 +1,10 @@
+## 3.1.5
+
+- Implement continuous adaptive bounds scaling to handle ALL screen sizes
+- Fix issues with medium-sized screens where clusters weren't visible
+- Create graduated extension factors based on viewport size for optimal cluster visibility
+- Optimize bounds calculation with dynamically scaled inflation based on zoom level
+
 ## 3.1.4
 
 - Fix issue where clusters weren't visible on smaller screens
