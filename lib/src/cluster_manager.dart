@@ -27,7 +27,8 @@ class ClusterManager<T extends ClusterItem> {
       this.maxDistParams,
       this.stopClusteringZoom})
       : this.markerBuilder = markerBuilder ?? _basicMarkerBuilder,
-        this.extraPercent = extraPercent ?? (kIsWeb ? 1.0 : 0.5),
+        // Default extraPercent is adaptive based on platform
+        this.extraPercent = extraPercent ?? (kIsWeb ? 0.75 : 0.5),
         assert(levels.length <= precision);
 
   /// Method to build markers
@@ -68,6 +69,9 @@ class ClusterManager<T extends ClusterItem> {
   
   /// Flag to track if map is idle
   bool _isMapIdle = true;
+  
+  /// Last known map bounds
+  LatLngBounds? _lastKnownBounds;
 
   /// Throttle timer for web updates
   Timer? _throttleTimer;
@@ -103,6 +107,12 @@ class ClusterManager<T extends ClusterItem> {
     if (kIsWeb) {
       _throttleTimer?.cancel();
       _throttleTimer = Timer(Duration(milliseconds: 50), () async {
+        // Store current bounds for adaptive calculations
+        if (_mapId != null) {
+          _lastKnownBounds = await GoogleMapsFlutterPlatform.instance
+            .getVisibleRegion(mapId: _mapId!);
+        }
+        
         List<Cluster<T>> mapMarkers = await getMarkers();
         if (mapMarkers.isEmpty && _isMapIdle) {
           // If no markers and map is idle, try again with a slightly delayed call
@@ -118,6 +128,12 @@ class ClusterManager<T extends ClusterItem> {
         updateMarkers(markers);
       });
     } else {
+      // Store current bounds for adaptive calculations
+      if (_mapId != null) {
+        _lastKnownBounds = await GoogleMapsFlutterPlatform.instance
+          .getVisibleRegion(mapId: _mapId!);
+      }
+      
       List<Cluster<T>> mapMarkers = await getMarkers();
       final Set<Marker> markers =
           Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
@@ -146,25 +162,96 @@ class ClusterManager<T extends ClusterItem> {
     }
   }
 
+  /// Get adaptive inflation percentage based on zoom level and map size
+  double _getAdaptiveExtraPercent() {
+    // Base value from constructor
+    double adaptivePercent = extraPercent;
+    
+    // No bounds information yet, use default
+    if (_lastKnownBounds == null) return adaptivePercent;
+    
+    // Calculate map width in degrees
+    double mapWidth = _getMapWidth(_lastKnownBounds!);
+    
+    // For very small map views (high zoom), increase extraPercent to ensure we get enough items
+    if (_zoom > 14) {
+      adaptivePercent = max(adaptivePercent, 1.0);
+    }
+    // For medium zoom levels, scale based on width
+    else if (_zoom > 10) {
+      if (mapWidth < 0.1) {
+        adaptivePercent = max(adaptivePercent, 0.8);
+      }
+    }
+    // For low zoom levels with wide view, reduce the extra percent to prevent loading too many items
+    else if (_zoom < 6 && mapWidth > 45) {
+      adaptivePercent = min(adaptivePercent, 0.4);
+    }
+    
+    return adaptivePercent;
+  }
+  
+  /// Calculate map width in degrees
+  double _getMapWidth(LatLngBounds bounds) {
+    double width;
+    if (bounds.northeast.longitude < bounds.southwest.longitude) {
+      // Map crosses the date line
+      width = (180.0 - bounds.southwest.longitude) + (bounds.northeast.longitude + 180);
+    } else {
+      width = bounds.northeast.longitude - bounds.southwest.longitude;
+    }
+    return width;
+  }
+  
+  /// Calculate map height in degrees
+  double _getMapHeight(LatLngBounds bounds) {
+    return bounds.northeast.latitude - bounds.southwest.latitude;
+  }
+  
+  /// Check if this is an ultra-wide view
+  bool _isUltraWideView(LatLngBounds bounds) {
+    double width = _getMapWidth(bounds);
+    // Ultra-wide is defined as seeing more than 90 degrees of longitude
+    return width > 90;
+  }
+  
+  /// Check if this is a very small view (high zoom)
+  bool _isSmallView(LatLngBounds bounds) {
+    double width = _getMapWidth(bounds);
+    double height = _getMapHeight(bounds);
+    // Small view is defined as seeing less than 0.05 degrees in either dimension
+    return width < 0.05 || height < 0.05;
+  }
+
   /// Retrieve cluster markers
   Future<List<Cluster<T>>> getMarkers() async {
     if (_mapId == null) return List.empty();
 
     final LatLngBounds mapBounds = await GoogleMapsFlutterPlatform.instance
         .getVisibleRegion(mapId: _mapId!);
+        
+    // Store for future adaptive calculations
+    _lastKnownBounds = mapBounds;
 
+    // Determine if we have special cases
+    bool isUltraWide = _isUltraWideView(mapBounds);
+    bool isSmallView = _isSmallView(mapBounds);
+    
+    // Get adaptive extraPercent based on current view
+    double adaptiveExtraPercent = _getAdaptiveExtraPercent();
+
+    // Calculate bounds with the current adaptive settings
     late LatLngBounds inflatedBounds;
     if (clusterAlgorithm == ClusterAlgorithm.GEOHASH) {
-      inflatedBounds = _inflateBounds(mapBounds);
+      inflatedBounds = _inflateBounds(mapBounds, adaptiveExtraPercent, isSmallView, isUltraWide);
     } else {
       inflatedBounds = mapBounds;
     }
 
-    // Check if we're dealing with an extremely wide visible region
-    bool isUltraWideScreen = (mapBounds.northeast.longitude - mapBounds.southwest.longitude) > 90;
-    
     List<T> visibleItems;
-    if (isUltraWideScreen && kIsWeb) {
+    
+    // Special filtering for ultra-wide screens
+    if (isUltraWide && kIsWeb) {
       // For ultra-wide screens on web, use a more efficient filtering approach
       // First check if items are within the latitude bounds
       visibleItems = items.where((i) {
@@ -186,7 +273,27 @@ class ClusterManager<T extends ClusterItem> {
                  i.location.longitude <= inflatedBounds.northeast.longitude;
         }).toList();
       }
-    } else {
+    } 
+    // Special case for very small views
+    else if (isSmallView) {
+      // For small views, we need to be more precise with bounds checking
+      visibleItems = items.where((i) {
+        if (inflatedBounds.northeast.longitude < inflatedBounds.southwest.longitude) {
+          // Handle date line crossing
+          return i.location.latitude >= inflatedBounds.southwest.latitude &&
+                 i.location.latitude <= inflatedBounds.northeast.latitude &&
+                 (i.location.longitude >= inflatedBounds.southwest.longitude || 
+                  i.location.longitude <= inflatedBounds.northeast.longitude);
+        } else {
+          // Standard bounds check
+          return i.location.latitude >= inflatedBounds.southwest.latitude &&
+                 i.location.latitude <= inflatedBounds.northeast.latitude &&
+                 i.location.longitude >= inflatedBounds.southwest.longitude &&
+                 i.location.longitude <= inflatedBounds.northeast.longitude;
+        }
+      }).toList();
+    }
+    else {
       // Standard bounds check for normal screens
       visibleItems = items.where((i) {
         return inflatedBounds.contains(i.location);
@@ -210,35 +317,63 @@ class ClusterManager<T extends ClusterItem> {
     return markers;
   }
 
-  LatLngBounds _inflateBounds(LatLngBounds bounds) {
+  LatLngBounds _inflateBounds(LatLngBounds bounds, double adaptiveExtraPercent, bool isSmallView, bool isUltraWide) {
     // Bounds that cross the date line expand compared to their difference with the date line
     double lng = 0;
     if (bounds.northeast.longitude < bounds.southwest.longitude) {
-      lng = extraPercent *
+      lng = adaptiveExtraPercent *
           ((180.0 - bounds.southwest.longitude) +
               (bounds.northeast.longitude + 180));
     } else {
-      lng = extraPercent *
+      lng = adaptiveExtraPercent *
           (bounds.northeast.longitude - bounds.southwest.longitude);
     }
 
-    // Ensure a minimum inflation amount for ultra-wide screens
-    double minLngInflation = 0.1; // Minimum 0.1 degrees longitude inflation
+    // Different minimum inflation amounts based on view size
+    double minLngInflation;
+    if (isSmallView) {
+      // For very zoomed-in views, use a tiny inflation amount
+      minLngInflation = 0.005;
+    } else if (isUltraWide) {
+      // For ultra-wide views, use a larger inflation amount
+      minLngInflation = 0.2;
+    } else if (_zoom > 15) {
+      // High zoom, small inflation
+      minLngInflation = 0.01;
+    } else if (_zoom > 10) {
+      // Medium zoom
+      minLngInflation = 0.03;
+    } else {
+      // Low zoom, standard inflation
+      minLngInflation = 0.1;
+    }
+    
+    // Apply minimum if needed
     lng = lng < minLngInflation ? minLngInflation : lng;
 
     // Latitudes expanded beyond +/- 90 are automatically clamped by LatLng
-    double lat =
-        extraPercent * (bounds.northeast.latitude - bounds.southwest.latitude);
+    double lat = adaptiveExtraPercent * (bounds.northeast.latitude - bounds.southwest.latitude);
     
-    // Ensure a minimum inflation amount for very tall screens
-    double minLatInflation = 0.1; // Minimum 0.1 degrees latitude inflation
+    // Different minimum latitude inflation based on view size
+    double minLatInflation;
+    if (isSmallView) {
+      minLatInflation = 0.005;
+    } else if (_zoom > 15) {
+      minLatInflation = 0.01;
+    } else if (_zoom > 10) {
+      minLatInflation = 0.03;
+    } else {
+      minLatInflation = 0.1;
+    }
+    
+    // Apply minimum if needed
     lat = lat < minLatInflation ? minLatInflation : lat;
 
     double eLng = (bounds.northeast.longitude + lng).clamp(-_maxLng, _maxLng);
     double wLng = (bounds.southwest.longitude - lng).clamp(-_maxLng, _maxLng);
 
-    // Handle the case where the bounds are extremely wide
-    bool isExtremelyWide = (bounds.northeast.longitude - bounds.southwest.longitude) > 90;
+    // Special case for extremely wide bounds to prevent over-inflation
+    bool isExtremelyWide = _getMapWidth(bounds) > 90;
     
     return LatLngBounds(
       southwest: LatLng(bounds.southwest.latitude - lat, wLng),

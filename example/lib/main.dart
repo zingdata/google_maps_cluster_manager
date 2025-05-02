@@ -74,14 +74,13 @@ class MapSampleState extends State<MapSample> {
   }
 
   cluster_manager.ClusterManager _initClusterManager() {
-    // Use a higher extraPercent for web and ultra-wide screens
-    double extraPercent = kIsWeb ? 1.0 : 0.5;
-    
+    // The extraPercent parameter is now internally adaptive based on zoom and map size
+    // No need to manually set different values for different screen sizes
     return cluster_manager.ClusterManager<Place>(
       items, 
       _updateMarkers,
       markerBuilder: _markerBuilder,
-      extraPercent: extraPercent,
+      // Default values will adapt automatically to screen size and zoom level
     );
   }
 

@@ -1,3 +1,11 @@
+## 3.1.3
+
+- Add adaptive sizing that works optimally across all map sizes
+- Implement dynamic inflation parameters based on zoom level and viewport size
+- Optimize clustering for both small mobile screens and ultra-wide displays
+- Add special handling for high-zoom (small view) scenarios
+- Improve precision of location filtering for different map sizes
+
 ## 3.1.2
 
 - Add support for ultra-wide screens to prevent clusters from disappearing
