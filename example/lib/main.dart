@@ -35,7 +35,6 @@ class MapSampleState extends State<MapSample> {
   Completer<GoogleMapController> _controller = Completer();
 
   Set<Marker> markers = Set();
-  bool _isClusteringEnabled = true;
 
   final CameraPosition _parisCameraPosition =
       CameraPosition(target: LatLng(48.856613, 2.352222), zoom: 12.0);
@@ -83,8 +82,6 @@ class MapSampleState extends State<MapSample> {
       _updateMarkers,
       markerBuilder: _markerBuilder,
       extraPercent: extraPercent,
-      // Start with clustering enabled
-      enableClustering: _isClusteringEnabled,
     );
   }
 
@@ -108,34 +105,16 @@ class MapSampleState extends State<MapSample> {
           },
           onCameraMove: _manager.onCameraMove,
           onCameraIdle: _manager.updateMap),
-      floatingActionButton: Column(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          FloatingActionButton(
-            heroTag: 'update',
-            onPressed: () {
-              _manager.setItems(<Place>[
-                for (int i = 0; i < 30; i++)
-                  Place(
-                      name: 'New Place ${DateTime.now()} $i',
-                      latLng: LatLng(48.858265 + i * 0.01, 2.350107))
-              ]);
-            },
-            child: Icon(Icons.update),
-          ),
-          SizedBox(height: 16),
-          FloatingActionButton(
-            heroTag: 'toggle',
-            onPressed: () {
-              // Toggle clustering
-              setState(() {
-                _isClusteringEnabled = !_isClusteringEnabled;
-              });
-              _manager.setEnableClustering(_isClusteringEnabled);
-            },
-            child: Icon(_isClusteringEnabled ? Icons.grid_off : Icons.grid_on),
-          ),
-        ],
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          _manager.setItems(<Place>[
+            for (int i = 0; i < 30; i++)
+              Place(
+                  name: 'New Place ${DateTime.now()} $i',
+                  latLng: LatLng(48.858265 + i * 0.01, 2.350107))
+          ]);
+        },
+        child: Icon(Icons.update),
       ),
     );
   }
