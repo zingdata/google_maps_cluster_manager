@@ -249,11 +249,14 @@ class ClusterManager<T extends ClusterItem> {
       inflatedBounds = mapBounds;
     }
 
-    // Check if we're dealing with an extremely wide visible region
-    bool isUltraWideScreen = (mapBounds.northeast.longitude - mapBounds.southwest.longitude) > 90;
+    // Check if we're dealing with a small or large screen based on bounds span
+    double latSpan = (mapBounds.northeast.latitude - mapBounds.southwest.latitude).abs();
+    double lngSpan = (mapBounds.northeast.longitude - mapBounds.southwest.longitude).abs();
+    bool isSmallScreen = latSpan < 0.1 || lngSpan < 0.1;
+    bool isUltraWideScreen = lngSpan > 90;
     
     // Use more efficient filtering with potentially better performance
-    List<T> visibleItems = _getVisibleItems(items, inflatedBounds, isUltraWideScreen);
+    List<T> visibleItems = _getVisibleItems(items, inflatedBounds, isUltraWideScreen, isSmallScreen);
 
     // If clustering is disabled, or we're at a high zoom level, return individual markers
     if (!enableClustering || (stopClusteringZoom != null && _zoom >= stopClusteringZoom!))
@@ -273,16 +276,42 @@ class ClusterManager<T extends ClusterItem> {
     return markers;
   }
   
-  List<T> _getVisibleItems(Iterable<T> allItems, LatLngBounds bounds, bool isUltraWideScreen) {
-    // Optimization: first do a rough filter based on latitude which is simpler
-    final latFiltered = allItems.where((i) {
-      return i.location.latitude >= bounds.southwest.latitude && 
-             i.location.latitude <= bounds.northeast.latitude;
-    });
-    
-    // Then filter by longitude which is more complex
-    if (isUltraWideScreen && kIsWeb) {
-      // For ultra-wide screens, use more targeted filtering
+  List<T> _getVisibleItems(Iterable<T> allItems, LatLngBounds bounds, bool isUltraWideScreen, bool isSmallScreen) {
+    // For small screens, be more inclusive to ensure clusters are visible
+    if (isSmallScreen) {
+      // For very small screens, include all items within a larger region
+      // First filter by latitude with extended bounds
+      double latExtension = 0.3; // Extend latitude bounds significantly for small screens
+      final latFiltered = allItems.where((i) {
+        return i.location.latitude >= (bounds.southwest.latitude - latExtension) && 
+               i.location.latitude <= (bounds.northeast.latitude + latExtension);
+      });
+      
+      // Then filter by longitude with extended bounds
+      double lngExtension = 0.3; // Extend longitude bounds significantly for small screens
+      
+      // Handle date line crossing
+      if (bounds.northeast.longitude < bounds.southwest.longitude) {
+        return latFiltered.where((i) {
+          return i.location.longitude >= (bounds.southwest.longitude - lngExtension) || 
+                 i.location.longitude <= (bounds.northeast.longitude + lngExtension);
+        }).toList();
+      } else {
+        return latFiltered.where((i) {
+          return i.location.longitude >= (bounds.southwest.longitude - lngExtension) && 
+                 i.location.longitude <= (bounds.northeast.longitude + lngExtension);
+        }).toList();
+      }
+    }
+    // For ultra-wide screens, use optimized filtering
+    else if (isUltraWideScreen && kIsWeb) {
+      // Optimization: first do a rough filter based on latitude which is simpler
+      final latFiltered = allItems.where((i) {
+        return i.location.latitude >= bounds.southwest.latitude && 
+               i.location.latitude <= bounds.northeast.latitude;
+      });
+      
+      // Then filter by longitude which is more complex
       if (bounds.northeast.longitude < bounds.southwest.longitude) {
         // Date line is crossed
         return latFiltered.where((i) {
@@ -298,7 +327,7 @@ class ClusterManager<T extends ClusterItem> {
       }
     } else {
       // For normal screens, use the standard bounds.contains check
-      return latFiltered.where((i) => bounds.contains(i.location)).toList();
+      return allItems.where((i) => bounds.contains(i.location)).toList();
     }
   }
 
@@ -314,16 +343,18 @@ class ClusterManager<T extends ClusterItem> {
           (bounds.northeast.longitude - bounds.southwest.longitude);
     }
 
-    // Ensure a minimum inflation amount for ultra-wide screens
-    double minLngInflation = 0.1; // Minimum 0.1 degrees longitude inflation
+    // For smaller screens, ensure we have a minimum inflation amount
+    // This is critical for ensuring clusters are visible on small screens
+    double screenSizeFactor = kIsWeb ? 0.2 : 0.1;
+    double minLngInflation = screenSizeFactor; // Minimum longitude inflation
     lng = lng < minLngInflation ? minLngInflation : lng;
 
     // Latitudes expanded beyond +/- 90 are automatically clamped by LatLng
     double lat =
         extraPercent * (bounds.northeast.latitude - bounds.southwest.latitude);
     
-    // Ensure a minimum inflation amount for very tall screens
-    double minLatInflation = 0.1; // Minimum 0.1 degrees latitude inflation
+    // For smaller screens, ensure a minimum inflation amount
+    double minLatInflation = screenSizeFactor; // Minimum latitude inflation
     lat = lat < minLatInflation ? minLatInflation : lat;
 
     double eLng = (bounds.northeast.longitude + lng).clamp(-_maxLng, _maxLng);

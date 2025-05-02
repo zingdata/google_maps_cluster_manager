@@ -1,3 +1,9 @@
+## 3.1.4
+
+- Fix issue where clusters weren't visible on smaller screens
+- Add special handling for small screen sizes to ensure markers are properly displayed
+- Improve bounds calculation for all screen sizes
+
 ## 3.1.3
 
 - Add caching system to improve performance during map movements
