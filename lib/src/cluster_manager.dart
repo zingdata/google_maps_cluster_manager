@@ -77,23 +77,11 @@ class ClusterManager<T extends ClusterItem> {
   /// Last known zoom
   late double _zoom;
   
-  /// Last known bounds
-  LatLngBounds? _lastBounds;
-  
-  /// Last known camera position
-  CameraPosition? _lastPosition;
-
-  /// Cache of recently computed clusters
-  final _clusterCache = _ClusterCache<T>();
-  
   /// Flag to track if map is idle
   bool _isMapIdle = true;
 
   /// Throttle timer for web updates
   Timer? _throttleTimer;
-  
-  /// Debounce timer for map movements
-  Timer? _debounceTimer;
 
   final double _maxLng = 180 - pow(10, -10.0) as double;
 
@@ -123,7 +111,6 @@ class ClusterManager<T extends ClusterItem> {
   void setEnableClustering(bool enableClustering) {
     if (this._enableClustering != enableClustering) {
       this._enableClustering = enableClustering;
-      _clusterCache.clear();
       updateMap();
     }
   }
@@ -131,7 +118,7 @@ class ClusterManager<T extends ClusterItem> {
   void _updateClusters() async {
     if (_mapId == null) return;
     
-    // On web, throttle updates to prevent flickering
+    // On web, use a simple throttle to prevent too many updates
     if (kIsWeb) {
       _throttleTimer?.cancel();
       _throttleTimer = Timer(Duration(milliseconds: 50), () async {
@@ -145,23 +132,6 @@ class ClusterManager<T extends ClusterItem> {
   void _updateClustersFinal() async {
     if (_mapId == null) return;
     
-    // Get the current visible region
-    final LatLngBounds mapBounds = await GoogleMapsFlutterPlatform.instance
-        .getVisibleRegion(mapId: _mapId!);
-    
-    // Check cache first if bounds haven't changed significantly
-    if (_lastBounds != null && 
-        _isSimilarBounds(_lastBounds!, mapBounds) &&
-        _clusterCache.hasValidCacheFor(_zoom)) {
-      final cachedMarkers = _clusterCache.get(_zoom);
-      if (cachedMarkers != null) {
-        updateMarkers(cachedMarkers);
-        return;
-      }
-    }
-    
-    _lastBounds = mapBounds;
-    
     final List<Cluster<T>> mapMarkers = await getMarkers();
     if (mapMarkers.isEmpty && _isMapIdle) {
       // If no markers and map is idle, try again with a slightly delayed call
@@ -174,33 +144,18 @@ class ClusterManager<T extends ClusterItem> {
     final Set<Marker> markers = 
         Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
     
-    // Cache the results
-    _clusterCache.put(_zoom, markers);
-    
     updateMarkers(markers);
-  }
-  
-  bool _isSimilarBounds(LatLngBounds bounds1, LatLngBounds bounds2) {
-    // Check if bounds are similar enough to reuse cached clusters
-    const double tolerance = 0.01; // ~1.1km at equator
-    
-    return (bounds1.northeast.latitude - bounds2.northeast.latitude).abs() < tolerance &&
-           (bounds1.northeast.longitude - bounds2.northeast.longitude).abs() < tolerance &&
-           (bounds1.southwest.latitude - bounds2.southwest.latitude).abs() < tolerance &&
-           (bounds1.southwest.longitude - bounds2.southwest.longitude).abs() < tolerance;
   }
 
   /// Update all cluster items
   void setItems(List<T> newItems) {
     _items = newItems;
-    _clusterCache.clear();
     updateMap();
   }
 
   /// Add on cluster item
   void addItem(ClusterItem newItem) {
     _items = List.from([...items, newItem]);
-    _clusterCache.clear();
     updateMap();
   }
 
@@ -209,29 +164,8 @@ class ClusterManager<T extends ClusterItem> {
     _isMapIdle = false;
     _zoom = position.zoom;
     
-    // If the position changed significantly, clear the cache
-    if (_lastPosition != null) {
-      if ((position.zoom - _lastPosition!.zoom).abs() > 0.5 || 
-          (position.target.latitude - _lastPosition!.target.latitude).abs() > 0.1 ||
-          (position.target.longitude - _lastPosition!.target.longitude).abs() > 0.1) {
-        _clusterCache.clearExcept(position.zoom);
-      }
-    }
-    _lastPosition = position;
-    
-    // Debounce rapid camera movements
-    _debounceTimer?.cancel();
-    
     if (forceUpdate) {
       updateMap();
-    } else if (kIsWeb) {
-      // For web, apply a short debounce to smooth out updates during panning
-      _debounceTimer = Timer(Duration(milliseconds: 100), () {
-        // Only update if we're not at the exact same zoom level as a cached result
-        if (!_clusterCache.hasExactCacheFor(_zoom)) {
-          _updateClusters();
-        }
-      });
     }
   }
 
@@ -504,72 +438,5 @@ class ClusterManager<T extends ClusterItem> {
     final data = await img.toByteData(format: ImageByteFormat.png) as ByteData;
 
     return BitmapDescriptor.fromBytes(data.buffer.asUint8List());
-  }
-}
-
-/// Cache for cluster results to avoid recomputation
-class _ClusterCache<T extends ClusterItem> {
-  // Store markers by zoom level with LRU eviction
-  final _cache = LinkedHashMap<double, Set<Marker>>();
-  final int _maxSize = 5; // Maximum number of zoom levels to cache
-  
-  Set<Marker>? get(double zoom) {
-    // Return closest zoom level within 0.1
-    final exactMatch = _cache[zoom];
-    if (exactMatch != null) {
-      // Move to end of LRU
-      final value = _cache.remove(zoom);
-      _cache[zoom] = value!;
-      return exactMatch;
-    }
-    
-    // Look for close matches
-    for (final cachedZoom in _cache.keys) {
-      if ((cachedZoom - zoom).abs() < 0.1) {
-        // Close enough to use
-        final value = _cache.remove(cachedZoom);
-        _cache[cachedZoom] = value!;
-        return value;
-      }
-    }
-    
-    return null;
-  }
-  
-  void put(double zoom, Set<Marker> markers) {
-    // Evict oldest if at capacity
-    if (_cache.length >= _maxSize) {
-      _cache.remove(_cache.keys.first);
-    }
-    
-    _cache[zoom] = markers;
-  }
-  
-  bool hasValidCacheFor(double zoom) {
-    // Check for exact or close match
-    if (_cache.containsKey(zoom)) return true;
-    
-    for (final cachedZoom in _cache.keys) {
-      if ((cachedZoom - zoom).abs() < 0.1) {
-        return true;
-      }
-    }
-    
-    return false;
-  }
-  
-  bool hasExactCacheFor(double zoom) {
-    return _cache.containsKey(zoom);
-  }
-  
-  void clear() {
-    _cache.clear();
-  }
-  
-  void clearExcept(double zoom) {
-    final keysToRemove = _cache.keys.where((k) => (k - zoom).abs() > 0.5).toList();
-    for (final key in keysToRemove) {
-      _cache.remove(key);
-    }
   }
 }

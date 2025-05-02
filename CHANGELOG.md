@@ -1,3 +1,10 @@
+## 3.1.6
+
+- Remove caching system to improve reliability and consistency of cluster display
+- Simplify update logic to ensure clusters are always visible
+- Maintain adaptive bounds scaling for all screen sizes
+- Fix inconsistent cluster visibility issues
+
 ## 3.1.5
 
 - Implement continuous adaptive bounds scaling to handle ALL screen sizes
