@@ -1,3 +1,9 @@
+## 3.1.1
+
+- Fix web-specific issues where clusters disappear on initial load or during zoom operations
+- Add throttling mechanism for web to ensure smooth cluster updates
+- Improve web map rendering with proper timing for updates
+
 ## 3.1.0
 
 - Bump dependency versions

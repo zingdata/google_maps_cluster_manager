@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'dart:ui';
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +64,12 @@ class ClusterManager<T extends ClusterItem> {
 
   /// Last known zoom
   late double _zoom;
+  
+  /// Flag to track if map is idle
+  bool _isMapIdle = true;
+
+  /// Throttle timer for web updates
+  Timer? _throttleTimer;
 
   final double _maxLng = 180 - pow(10, -10.0) as double;
 
@@ -70,21 +77,51 @@ class ClusterManager<T extends ClusterItem> {
   void setMapId(int mapId, {bool withUpdate = true}) async {
     _mapId = mapId;
     _zoom = await GoogleMapsFlutterPlatform.instance.getZoomLevel(mapId: mapId);
-    if (withUpdate) updateMap();
+    if (withUpdate) {
+      // For web, ensure we render markers after a short delay for map to fully initialize
+      if (kIsWeb) {
+        Future.delayed(Duration(milliseconds: 100), () {
+          updateMap();
+        });
+      } else {
+        updateMap();
+      }
+    }
   }
 
   /// Method called on map update to update cluster. Can also be manually called to force update.
   void updateMap() {
+    _isMapIdle = true;
     _updateClusters();
   }
 
   void _updateClusters() async {
-    List<Cluster<T>> mapMarkers = await getMarkers();
+    if (_mapId == null) return;
+    
+    // On web, throttle updates to prevent flickering
+    if (kIsWeb) {
+      _throttleTimer?.cancel();
+      _throttleTimer = Timer(Duration(milliseconds: 50), () async {
+        List<Cluster<T>> mapMarkers = await getMarkers();
+        if (mapMarkers.isEmpty && _isMapIdle) {
+          // If no markers and map is idle, try again with a slightly delayed call
+          Future.delayed(Duration(milliseconds: 100), () {
+            if (_isMapIdle) _updateClusters();
+          });
+          return;
+        }
 
-    final Set<Marker> markers =
-        Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
+        final Set<Marker> markers =
+            Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
 
-    updateMarkers(markers);
+        updateMarkers(markers);
+      });
+    } else {
+      List<Cluster<T>> mapMarkers = await getMarkers();
+      final Set<Marker> markers =
+          Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
+      updateMarkers(markers);
+    }
   }
 
   /// Update all cluster items
@@ -101,6 +138,7 @@ class ClusterManager<T extends ClusterItem> {
 
   /// Method called on camera move
   void onCameraMove(CameraPosition position, {forceUpdate = false}) {
+    _isMapIdle = false;
     _zoom = position.zoom;
     if (forceUpdate) {
       updateMap();
