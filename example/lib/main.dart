@@ -5,7 +5,8 @@ import 'package:example/place.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_maps_cluster_manager/google_maps_cluster_manager.dart';
+// Import with a prefix to avoid name conflicts
+import 'package:google_maps_cluster_manager/google_maps_cluster_manager.dart' as cluster_manager;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 void main() => runApp(MyApp());
@@ -29,11 +30,12 @@ class MapSample extends StatefulWidget {
 }
 
 class MapSampleState extends State<MapSample> {
-  late ClusterManager _manager;
+  late cluster_manager.ClusterManager _manager;
 
   Completer<GoogleMapController> _controller = Completer();
 
   Set<Marker> markers = Set();
+  bool _isClusteringEnabled = true;
 
   final CameraPosition _parisCameraPosition =
       CameraPosition(target: LatLng(48.856613, 2.352222), zoom: 12.0);
@@ -72,9 +74,18 @@ class MapSampleState extends State<MapSample> {
     super.initState();
   }
 
-  ClusterManager _initClusterManager() {
-    return ClusterManager<Place>(items, _updateMarkers,
-        markerBuilder: _markerBuilder);
+  cluster_manager.ClusterManager _initClusterManager() {
+    // Use a higher extraPercent for web and ultra-wide screens
+    double extraPercent = kIsWeb ? 1.0 : 0.5;
+    
+    return cluster_manager.ClusterManager<Place>(
+      items, 
+      _updateMarkers,
+      markerBuilder: _markerBuilder,
+      extraPercent: extraPercent,
+      // Start with clustering enabled
+      enableClustering: _isClusteringEnabled,
+    );
   }
 
   void _updateMarkers(Set<Marker> markers) {
@@ -97,21 +108,39 @@ class MapSampleState extends State<MapSample> {
           },
           onCameraMove: _manager.onCameraMove,
           onCameraIdle: _manager.updateMap),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          _manager.setItems(<Place>[
-            for (int i = 0; i < 30; i++)
-              Place(
-                  name: 'New Place ${DateTime.now()} $i',
-                  latLng: LatLng(48.858265 + i * 0.01, 2.350107))
-          ]);
-        },
-        child: Icon(Icons.update),
+      floatingActionButton: Column(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          FloatingActionButton(
+            heroTag: 'update',
+            onPressed: () {
+              _manager.setItems(<Place>[
+                for (int i = 0; i < 30; i++)
+                  Place(
+                      name: 'New Place ${DateTime.now()} $i',
+                      latLng: LatLng(48.858265 + i * 0.01, 2.350107))
+              ]);
+            },
+            child: Icon(Icons.update),
+          ),
+          SizedBox(height: 16),
+          FloatingActionButton(
+            heroTag: 'toggle',
+            onPressed: () {
+              // Toggle clustering
+              setState(() {
+                _isClusteringEnabled = !_isClusteringEnabled;
+              });
+              _manager.setEnableClustering(_isClusteringEnabled);
+            },
+            child: Icon(_isClusteringEnabled ? Icons.grid_off : Icons.grid_on),
+          ),
+        ],
       ),
     );
   }
 
-  Future<Marker> Function(Cluster<Place>) get _markerBuilder =>
+  Future<Marker> Function(cluster_manager.Cluster<Place>) get _markerBuilder =>
       (cluster) async {
         return Marker(
           markerId: MarkerId(cluster.getId()),

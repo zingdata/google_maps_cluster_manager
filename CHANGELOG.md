@@ -1,3 +1,18 @@
+## 3.1.3
+
+- Add caching system to improve performance during map movements
+- Add debouncing and throttling mechanisms to reduce unnecessary updates
+- Optimize item filtering for better performance with large datasets
+- Add ability to enable/disable clustering at runtime
+- Improve performance on web platforms with smarter update scheduling
+
+## 3.1.2
+
+- Add support for ultra-wide screens to prevent clusters from disappearing
+- Improve bounding area calculations for very wide map views
+- Enhance filtering logic to better handle large visible regions
+- Increase default extraPercent for web platforms
+
 ## 3.1.1
 
 - Fix web-specific issues where clusters disappear on initial load or during zoom operations
