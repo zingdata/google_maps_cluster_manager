@@ -102,24 +102,27 @@ class ClusterManager<T extends ClusterItem> {
 
   void _updateClusters() async {
     if (_mapId == null) return;
-    
-    // On web, throttle updates to prevent flickering
+
     if (kIsWeb) {
       _throttleTimer?.cancel();
-      _throttleTimer = Timer(Duration(milliseconds: 50), () async {
+      // Use a slightly longer delay for idle updates to ensure stability
+      // Shorter delay could still conflict with rapid events.
+      final delay = _isMapIdle ? Duration(milliseconds: 150) : Duration(milliseconds: 50);
+      _throttleTimer = Timer(delay, () async {
         // Store current bounds for adaptive calculations
         if (_mapId != null) {
           _lastKnownBounds = await GoogleMapsFlutterPlatform.instance
             .getVisibleRegion(mapId: _mapId!);
         }
-        
+
         List<Cluster<T>> mapMarkers = await getMarkers();
-        if (mapMarkers.isEmpty && _isMapIdle) {
-          // If no markers and map is idle, try again with a slightly delayed call
-          Future.delayed(Duration(milliseconds: 100), () {
-            if (_isMapIdle) _updateClusters();
-          });
-          return;
+
+        // Removed the complex retry logic. The more robust idle delay should handle most cases.
+        // If mapMarkers is still empty, it might be a genuine case (e.g., no items in view).
+        // If issues persist, we might need to revisit initial load or bounds calculation.
+        if (mapMarkers.isEmpty && _isMapIdle && kDebugMode) {
+           print("ClusterManager: No markers found after idle update. Bounds: $_lastKnownBounds");
+           // Consider if a single explicit retry after idle is needed here if problems persist.
         }
 
         final Set<Marker> markers =
