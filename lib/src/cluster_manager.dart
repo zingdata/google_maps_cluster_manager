@@ -65,7 +65,7 @@ class ClusterManager<T extends ClusterItem> {
   Iterable<T> _items;
 
   /// Last known zoom
-  late double _zoom;
+  late double _zoom = 0; // Initialize _zoom
   
   /// Flag to track if map is idle
   bool _isMapIdle = true;
@@ -74,181 +74,192 @@ class ClusterManager<T extends ClusterItem> {
   LatLngBounds? _lastKnownBounds;
 
   /// Throttle timer for web updates
-  Timer? _throttleTimer;
+  Timer? _updateTimer; // Renamed for clarity
+
+  /// Flag to indicate if an update calculation is currently running
+  bool _isUpdateRunning = false;
 
   final double _maxLng = 180 - pow(10, -10.0) as double;
 
   /// Set Google Map Id for the cluster manager
   void setMapId(int mapId, {bool withUpdate = true}) async {
     _mapId = mapId;
-    _zoom = await GoogleMapsFlutterPlatform.instance.getZoomLevel(mapId: mapId);
+    // Fetch initial zoom *before* triggering the first update
+    try {
+      _zoom = await GoogleMapsFlutterPlatform.instance.getZoomLevel(mapId: mapId);
+    } catch (e) {
+       if (kDebugMode) {
+         print('Error getting initial zoom: $e');
+       }
+       // Assign a default zoom if fetching fails? Or handle error appropriately.
+       try {
+         _zoom = await GoogleMapsFlutterPlatform.instance.getVisibleRegion(mapId: mapId).then((b) => _calculateZoom(b)); // Fallback
+       } catch (e2) {
+         if (kDebugMode) print('Error getting initial bounds for zoom fallback: $e2');
+         _zoom = 0; // Ultimate fallback
+       }
+    }
+
     if (withUpdate) {
-      // For web, ensure we render markers after a short delay for map to fully initialize
-      if (kIsWeb) {
-        Future.delayed(Duration(milliseconds: 100), () {
-          updateMap();
-        });
-      } else {
-        updateMap();
-      }
-    }
-  }
-
-  /// Method called on map update to update cluster. Can also be manually called to force update.
-  void updateMap() {
-    _isMapIdle = true;
-    _updateClusters();
-  }
-
-  void _updateClusters() async {
-    if (_mapId == null) return;
-
-    if (kIsWeb) {
-      _throttleTimer?.cancel();
-      // Use a slightly longer delay for idle updates to ensure stability
-      // Shorter delay could still conflict with rapid events.
-      final delay = _isMapIdle ? Duration(milliseconds: 150) : Duration(milliseconds: 50);
-      _throttleTimer = Timer(delay, () async {
-        // Store current bounds for adaptive calculations
-        if (_mapId != null) {
-          _lastKnownBounds = await GoogleMapsFlutterPlatform.instance
-            .getVisibleRegion(mapId: _mapId!);
-        }
-
-        List<Cluster<T>> mapMarkers = await getMarkers();
-
-        // Removed the complex retry logic. The more robust idle delay should handle most cases.
-        // If mapMarkers is still empty, it might be a genuine case (e.g., no items in view).
-        // If issues persist, we might need to revisit initial load or bounds calculation.
-        if (mapMarkers.isEmpty && _isMapIdle && kDebugMode) {
-           print("ClusterManager: No markers found after idle update. Bounds: $_lastKnownBounds");
-           // Consider if a single explicit retry after idle is needed here if problems persist.
-        }
-
-        final Set<Marker> markers =
-            Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
-
-        updateMarkers(markers);
+      // Trigger initial update slightly delayed, especially for web
+      // Let's try a slightly longer delay initially.
+      Future.delayed(Duration(milliseconds: kIsWeb ? 250 : 50), () {
+         onCameraIdle(); // Simulate initial idle state to trigger update
       });
-    } else {
-      // Store current bounds for adaptive calculations
-      if (_mapId != null) {
-        _lastKnownBounds = await GoogleMapsFlutterPlatform.instance
-          .getVisibleRegion(mapId: _mapId!);
-      }
-      
-      List<Cluster<T>> mapMarkers = await getMarkers();
-      final Set<Marker> markers =
-          Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
-      updateMarkers(markers);
     }
   }
 
-  /// Update all cluster items
-  void setItems(List<T> newItems) {
-    _items = newItems;
-    updateMap();
-  }
-
-  /// Add on cluster item
-  void addItem(ClusterItem newItem) {
-    _items = List.from([...items, newItem]);
-    updateMap();
+  /// Method called on map update to update cluster. Triggered by onCameraIdle.
+  void onCameraIdle() {
+    _isMapIdle = true;
+    // Trigger the cluster update calculation
+    _triggerUpdate();
   }
 
   /// Method called on camera move
   void onCameraMove(CameraPosition position, {forceUpdate = false}) {
-    _isMapIdle = false;
-    _zoom = position.zoom;
-    if (forceUpdate) {
-      updateMap();
-    }
+     _isMapIdle = false;
+     _zoom = position.zoom;
+     // Optional: Could potentially schedule a throttled update here if needed during move,
+     // but let's prioritize the idle update first.
+     // If forceUpdate is true (e.g., from setItems), trigger immediately.
+     if (forceUpdate) {
+        _triggerUpdate(immediate: true);
+     } else if (kIsWeb) {
+       // On web, maybe still useful to have *some* update during drag, but debounced.
+       // Let's use a simpler debounce: reset timer on each move.
+       _updateTimer?.cancel();
+       _updateTimer = Timer(Duration(milliseconds: 150), () {
+         // Only run if map hasn't become idle already
+         if (!_isMapIdle) {
+           _triggerUpdate();
+         }
+       });
+     }
   }
 
-  /// Get adaptive inflation percentage based on zoom level and map size
-  double _getAdaptiveExtraPercent() {
-    // Base value from constructor
-    double adaptivePercent = extraPercent;
-    
-    // No bounds information yet, use default
-    if (_lastKnownBounds == null) return adaptivePercent;
-    
-    // Calculate map width in degrees
-    double mapWidth = _getMapWidth(_lastKnownBounds!);
-    
-    // For very small map views (high zoom), increase extraPercent to ensure we get enough items
-    if (_zoom > 14) {
-      adaptivePercent = max(adaptivePercent, 1.0);
+   /// Update all cluster items - Triggers an immediate update
+  void setItems(List<T> newItems) {
+    _items = newItems;
+    _triggerUpdate(immediate: true); // Force update immediately
+  }
+
+  /// Add on cluster item - Triggers an immediate update
+  void addItem(ClusterItem newItem) {
+    _items = List.from([...items, newItem]);
+    _triggerUpdate(immediate: true); // Force update immediately
+  }
+
+
+  /// Central method to trigger the actual cluster calculation and marker update.
+  /// Uses a debounce timer for web moves, but runs immediately on idle or forced updates.
+  void _triggerUpdate({bool immediate = false}) {
+    if (_mapId == null) return;
+
+    // Cancel any pending timer if update is immediate or triggered by idle
+    if (immediate || _isMapIdle) {
+      _updateTimer?.cancel();
     }
-    // For medium zoom levels, scale based on width
-    else if (_zoom > 10) {
-      if (mapWidth < 0.1) {
-        adaptivePercent = max(adaptivePercent, 0.8);
+
+    // Simple debounce: If not immediate and a timer is already active, do nothing.
+    if (!immediate && _updateTimer != null && _updateTimer!.isActive) {
+      return;
+    }
+
+    // If an update is already running, don't start another one unless immediate
+    if (_isUpdateRunning && !immediate) {
+       if (kDebugMode) print("ClusterManager: Update already running, skipping trigger.");
+       return;
+    }
+
+    final updateAction = () async {
+      // Double check run condition inside async callback
+      if (_isUpdateRunning) {
+         if (kDebugMode) print("ClusterManager: Update already running, skipping execution.");
+         return; // Prevent concurrent execution
       }
+       if (_mapId == null) return; // Check mapId again inside async closure
+
+      _isUpdateRunning = true;
+       if (kDebugMode) print("ClusterManager: Starting cluster update. Idle: $_isMapIdle");
+
+      try {
+         // Always get fresh bounds when starting the update
+         final currentBounds = await GoogleMapsFlutterPlatform.instance.getVisibleRegion(mapId: _mapId!);
+         // Basic validation
+         if (currentBounds.southwest.latitude == currentBounds.northeast.latitude ||
+             currentBounds.southwest.longitude == currentBounds.northeast.longitude) {
+             if (kDebugMode) print("ClusterManager: Invalid bounds received: $currentBounds. Skipping update.");
+             _isUpdateRunning = false;
+             return;
+         }
+         _lastKnownBounds = currentBounds; // Store the valid bounds
+
+         List<Cluster<T>> mapMarkers = await getMarkers(currentBounds); // Pass bounds
+
+         // Check if mapId became null during async operations (e.g., dispose)
+         if (_mapId == null) {
+            if (kDebugMode) print("ClusterManager: mapId became null during update. Aborting marker update.");
+            _isUpdateRunning = false;
+            return;
+         }
+
+         final Set<Marker> markers =
+             Set.from(await Future.wait(mapMarkers.map((m) => markerBuilder(m))));
+
+         // Check again before updating UI
+         if (_mapId != null) {
+            updateMarkers(markers);
+            if (kDebugMode) print("ClusterManager: Update finished. ${markers.length} markers generated.");
+         } else {
+            if (kDebugMode) print("ClusterManager: mapId became null before calling updateMarkers. Aborting.");
+         }
+
+      } catch (e, stack) {
+         if (kDebugMode) {
+           print('ClusterManager: Error during cluster update: $e');
+           print(stack);
+         }
+      } finally {
+        _isUpdateRunning = false;
+        if (kDebugMode) print("ClusterManager: Update flag set to false.");
+      }
+    };
+
+    if (immediate || !_isMapIdle || !kIsWeb) { // Run immediately for non-web, immediate calls, or non-idle web calls from timer
+       updateAction();
+    } else { // Use timer only for idle web updates to ensure final state settling
+        final delay = Duration(milliseconds: 50); // Short delay for idle web update
+        _updateTimer = Timer(delay, updateAction);
     }
-    // For low zoom levels with wide view, reduce the extra percent to prevent loading too many items
-    else if (_zoom < 6 && mapWidth > 45) {
-      adaptivePercent = min(adaptivePercent, 0.4);
-    }
+  }
+
+  /// Retrieve cluster markers - Modified to accept bounds
+  Future<List<Cluster<T>>> getMarkers(LatLngBounds mapBounds) async { // Accept bounds
+    // mapId check removed - done in _triggerUpdate
     
-    return adaptivePercent;
-  }
-  
-  /// Calculate map width in degrees
-  double _getMapWidth(LatLngBounds bounds) {
-    double width;
-    if (bounds.northeast.longitude < bounds.southwest.longitude) {
-      // Map crosses the date line
-      width = (180.0 - bounds.southwest.longitude) + (bounds.northeast.longitude + 180);
-    } else {
-      width = bounds.northeast.longitude - bounds.southwest.longitude;
-    }
-    return width;
-  }
-  
-  /// Calculate map height in degrees
-  double _getMapHeight(LatLngBounds bounds) {
-    return bounds.northeast.latitude - bounds.southwest.latitude;
-  }
-  
-  /// Check if this is an ultra-wide view
-  bool _isUltraWideView(LatLngBounds bounds) {
-    double width = _getMapWidth(bounds);
-    // Ultra-wide is defined as seeing more than 90 degrees of longitude
-    return width > 90;
-  }
-  
-  /// Check if this is a very small view (high zoom)
-  bool _isSmallView(LatLngBounds bounds) {
-    double width = _getMapWidth(bounds);
-    double height = _getMapHeight(bounds);
-    // Small view is defined as seeing less than 0.05 degrees in either dimension
-    return width < 0.05 || height < 0.05;
-  }
-
-  /// Retrieve cluster markers
-  Future<List<Cluster<T>>> getMarkers() async {
-    if (_mapId == null) return List.empty();
-
-    final LatLngBounds mapBounds = await GoogleMapsFlutterPlatform.instance
-        .getVisibleRegion(mapId: _mapId!);
-        
-    // Store for future adaptive calculations
-    _lastKnownBounds = mapBounds;
+    // Use provided bounds (already validated in _triggerUpdate)
+    final currentMapBounds = mapBounds; 
+    
+    // Store for adaptive calculations (redundant if always passed, but safe)
+    // _lastKnownBounds = currentMapBounds; // Already set in _triggerUpdate
 
     // Determine if we have special cases
-    bool isUltraWide = _isUltraWideView(mapBounds);
-    bool isSmallView = _isSmallView(mapBounds);
+    bool isUltraWide = _isUltraWideView(currentMapBounds);
+    bool isSmallView = _isSmallView(currentMapBounds);
     
+    // Use current zoom level
+    final currentZoom = _zoom;
+
     // Get adaptive extraPercent based on current view
-    double adaptiveExtraPercent = _getAdaptiveExtraPercent();
+    double adaptiveExtraPercent = _getAdaptiveExtraPercent(); // Uses _zoom and _lastKnownBounds
 
     // Calculate bounds with the current adaptive settings
     late LatLngBounds inflatedBounds;
     if (clusterAlgorithm == ClusterAlgorithm.GEOHASH) {
-      inflatedBounds = _inflateBounds(mapBounds, adaptiveExtraPercent, isSmallView, isUltraWide);
+      inflatedBounds = _inflateBounds(currentMapBounds, adaptiveExtraPercent, isSmallView, isUltraWide);
     } else {
-      inflatedBounds = mapBounds;
+      inflatedBounds = currentMapBounds;
     }
 
     List<T> visibleItems;
@@ -281,40 +292,62 @@ class ClusterManager<T extends ClusterItem> {
     else if (isSmallView) {
       // For small views, we need to be more precise with bounds checking
       visibleItems = items.where((i) {
+        // Check latitude first
+        bool latOk = i.location.latitude >= inflatedBounds.southwest.latitude &&
+                     i.location.latitude <= inflatedBounds.northeast.latitude;
+        if (!latOk) return false;
+
+        // Check longitude, handling date line crossing
+        bool lngOk;
         if (inflatedBounds.northeast.longitude < inflatedBounds.southwest.longitude) {
-          // Handle date line crossing
-          return i.location.latitude >= inflatedBounds.southwest.latitude &&
-                 i.location.latitude <= inflatedBounds.northeast.latitude &&
-                 (i.location.longitude >= inflatedBounds.southwest.longitude || 
-                  i.location.longitude <= inflatedBounds.northeast.longitude);
+          // Date line crossed
+          lngOk = i.location.longitude >= inflatedBounds.southwest.longitude ||
+                  i.location.longitude <= inflatedBounds.northeast.longitude;
         } else {
-          // Standard bounds check
-          return i.location.latitude >= inflatedBounds.southwest.latitude &&
-                 i.location.latitude <= inflatedBounds.northeast.latitude &&
-                 i.location.longitude >= inflatedBounds.southwest.longitude &&
-                 i.location.longitude <= inflatedBounds.northeast.longitude;
+          // Normal
+          lngOk = i.location.longitude >= inflatedBounds.southwest.longitude &&
+                  i.location.longitude <= inflatedBounds.northeast.longitude;
         }
+        return lngOk;
       }).toList();
     }
     else {
       // Standard bounds check for normal screens
-      visibleItems = items.where((i) {
-        return inflatedBounds.contains(i.location);
+       visibleItems = items.where((i) {
+        // Check latitude first
+        bool latOk = i.location.latitude >= inflatedBounds.southwest.latitude &&
+                     i.location.latitude <= inflatedBounds.northeast.latitude;
+        if (!latOk) return false;
+
+        // Check longitude, handling date line crossing
+        bool lngOk;
+        if (inflatedBounds.northeast.longitude < inflatedBounds.southwest.longitude) {
+          // Date line crossed
+          lngOk = i.location.longitude >= inflatedBounds.southwest.longitude ||
+                  i.location.longitude <= inflatedBounds.northeast.longitude;
+        } else {
+          // Normal
+          lngOk = i.location.longitude >= inflatedBounds.southwest.longitude &&
+                  i.location.longitude <= inflatedBounds.northeast.longitude;
+        }
+        return lngOk;
+
       }).toList();
     }
 
-    if (stopClusteringZoom != null && _zoom >= stopClusteringZoom!)
+    if (stopClusteringZoom != null && currentZoom >= stopClusteringZoom!) {
       return visibleItems.map((i) => Cluster<T>.fromItems([i])).toList();
+    }
 
     List<Cluster<T>> markers;
 
     if (clusterAlgorithm == ClusterAlgorithm.GEOHASH ||
         visibleItems.length >= maxItemsForMaxDistAlgo) {
-      int level = _findLevel(levels);
+      int level = _findLevel(levels); // Uses _zoom
       markers = _computeClusters(visibleItems, List.empty(growable: true),
           level: level);
     } else {
-      markers = _computeClustersWithMaxDist(visibleItems, _zoom);
+      markers = _computeClustersWithMaxDist(visibleItems, currentZoom);
     }
 
     return markers;
@@ -331,19 +364,22 @@ class ClusterManager<T extends ClusterItem> {
       lng = adaptiveExtraPercent *
           (bounds.northeast.longitude - bounds.southwest.longitude);
     }
+    
+    lng = lng.abs(); // Ensure positive inflation
 
     // Different minimum inflation amounts based on view size
     double minLngInflation;
+    final currentZoom = _zoom; // Use current zoom
     if (isSmallView) {
       // For very zoomed-in views, use a tiny inflation amount
       minLngInflation = 0.005;
     } else if (isUltraWide) {
       // For ultra-wide views, use a larger inflation amount
       minLngInflation = 0.2;
-    } else if (_zoom > 15) {
+    } else if (currentZoom > 15) {
       // High zoom, small inflation
       minLngInflation = 0.01;
-    } else if (_zoom > 10) {
+    } else if (currentZoom > 10) {
       // Medium zoom
       minLngInflation = 0.03;
     } else {
@@ -356,14 +392,15 @@ class ClusterManager<T extends ClusterItem> {
 
     // Latitudes expanded beyond +/- 90 are automatically clamped by LatLng
     double lat = adaptiveExtraPercent * (bounds.northeast.latitude - bounds.southwest.latitude);
+    lat = lat.abs(); // Ensure positive inflation
     
     // Different minimum latitude inflation based on view size
     double minLatInflation;
     if (isSmallView) {
       minLatInflation = 0.005;
-    } else if (_zoom > 15) {
+    } else if (currentZoom > 15) {
       minLatInflation = 0.01;
-    } else if (_zoom > 10) {
+    } else if (currentZoom > 10) {
       minLatInflation = 0.03;
     } else {
       minLatInflation = 0.1;
@@ -372,22 +409,43 @@ class ClusterManager<T extends ClusterItem> {
     // Apply minimum if needed
     lat = lat < minLatInflation ? minLatInflation : lat;
 
-    double eLng = (bounds.northeast.longitude + lng).clamp(-_maxLng, _maxLng);
-    double wLng = (bounds.southwest.longitude - lng).clamp(-_maxLng, _maxLng);
-
-    // Special case for extremely wide bounds to prevent over-inflation
-    bool isExtremelyWide = _getMapWidth(bounds) > 90;
+    double nLat = bounds.northeast.latitude + lat;
+    double sLat = bounds.southwest.latitude - lat;
+    double eLng = bounds.northeast.longitude + lng;
+    double wLng = bounds.southwest.longitude - lng;
+   
+    // Handle longitude wrapping
+    if (eLng > 180) eLng = 180; // Clamp or wrap? Let LatLng handle clamping.
+    if (wLng < -180) wLng = -180;
     
+    // Clamp latitude
+    nLat = nLat.clamp(-90.0, 90.0);
+    sLat = sLat.clamp(-90.0, 90.0);
+    
+    // Adjust longitude for date line crossing in the original bounds
+    if (bounds.northeast.longitude < bounds.southwest.longitude) {
+        // Original bounds cross date line. Inflated bounds might too.
+        // Let LatLngBounds constructor handle the logic if wLng > eLng after inflation
+    } else {
+        // Original bounds don't cross date line. Check if inflation crosses it.
+        if (wLng < -180 || eLng > 180) {
+            // Inflation crosses the date line. Clamp to edges.
+            // LatLngBounds might handle this automatically if southwest longitude > northeast longitude.
+             wLng = wLng.clamp(-180.0, 180.0);
+             eLng = eLng.clamp(-180.0, 180.0);
+        }
+    }
+
     return LatLngBounds(
-      southwest: LatLng(bounds.southwest.latitude - lat, wLng),
-      northeast:
-          LatLng(bounds.northeast.latitude + lat, isExtremelyWide && lng == 0 ? bounds.northeast.longitude : (lng != 0 ? eLng : _maxLng)),
+      southwest: LatLng(sLat, wLng),
+      northeast: LatLng(nLat, eLng),
     );
   }
 
   int _findLevel(List<double> levels) {
+    final currentZoom = _zoom; // Use current zoom
     for (int i = levels.length - 1; i >= 0; i--) {
-      if (levels[i] <= _zoom) {
+      if (levels[i] <= currentZoom) {
         return i + 1;
       }
     }
@@ -418,18 +476,42 @@ class ClusterManager<T extends ClusterItem> {
       List<T> inputItems, List<Cluster<T>> markerItems,
       {int level = 5}) {
     if (inputItems.isEmpty) return markerItems;
-    String nextGeohash = inputItems[0].geohash.substring(0, level);
+    // Ensure geohash length doesn't exceed precision or available length
+    final clusterLevel = min(level, precision);
 
-    List<T> items = inputItems
-        .where((p) => p.geohash.substring(0, level) == nextGeohash)
-        .toList();
+    // Group items by geohash prefix at the determined level
+    Map<String, List<T>> geohashGroups = {};
+    for (var item in inputItems) {
+        if (item.geohash.length >= clusterLevel) {
+            String key = item.geohash.substring(0, clusterLevel);
+            (geohashGroups[key] ??= []).add(item);
+        } else {
+            // Handle items with geohash shorter than the cluster level (edge case)
+             String key = item.geohash; // Use full geohash as key
+            (geohashGroups[key] ??= []).add(item);
+        }
+    }
 
-    markerItems.add(Cluster<T>.fromItems(items));
+    // Create a cluster for each group
+    for (var group in geohashGroups.values) {
+      if (group.isNotEmpty) {
+          markerItems.add(Cluster<T>.fromItems(group));
+      }
+    }
+    
+    // The recursive part is replaced by the grouping logic above
+    return markerItems;
 
-    List<T> newInputList = List.from(
-        inputItems.where((i) => i.geohash.substring(0, level) != nextGeohash));
-
-    return _computeClusters(newInputList, markerItems, level: level);
+    // --- Old recursive logic removed ---
+    // String nextGeohash = inputItems[0].geohash.substring(0, level);
+    // List<T> items = inputItems
+    //     .where((p) => p.geohash.substring(0, level) == nextGeohash)
+    //     .toList();
+    // markerItems.add(Cluster<T>.fromItems(items));
+    // List<T> newInputList = List.from(
+    //     inputItems.where((i) => i.geohash.substring(0, level) != nextGeohash));
+    // return _computeClusters(newInputList, markerItems, level: level);
+     // --- End of removed logic ---
   }
 
   static Future<Marker> Function(Cluster) get _basicMarkerBuilder =>
@@ -438,7 +520,7 @@ class ClusterManager<T extends ClusterItem> {
           markerId: MarkerId(cluster.getId()),
           position: cluster.location,
           onTap: () {
-            print(cluster);
+            if (kDebugMode) print(cluster); // Print only in debug mode
           },
           icon: await _getBasicClusterBitmap(cluster.isMultiple ? 125 : 75,
               text: cluster.isMultiple ? cluster.count.toString() : null),
@@ -470,8 +552,111 @@ class ClusterManager<T extends ClusterItem> {
     }
 
     final img = await pictureRecorder.endRecording().toImage(size, size);
-    final data = await img.toByteData(format: ImageByteFormat.png) as ByteData;
+    // Added type check for safety, though toByteData should return ByteData? or throw
+    final data = await img.toByteData(format: ImageByteFormat.png);
+
+    if (data == null) {
+       // Handle error: return a default bitmap or throw?
+       if (kDebugMode) print("Error generating cluster bitmap: toByteData returned null");
+       // Returning an empty descriptor might cause issues, maybe have a fallback static one?
+       return BitmapDescriptor.defaultMarker;
+    }
 
     return BitmapDescriptor.fromBytes(data.buffer.asUint8List());
+  }
+
+   // Helper to estimate zoom from bounds (if getZoomLevel fails)
+  double _calculateZoom(LatLngBounds bounds) {
+     // Avoid division by zero or log(0) for invalid bounds
+     if (bounds.southwest.latitude == bounds.northeast.latitude ||
+         bounds.southwest.longitude == bounds.northeast.longitude) {
+       return 0; // Or some default zoom
+     }
+
+     // Constants for mercator projection
+     // Map width in pixels at zoom level 0
+     const double MERCATOR_RANGE = 256;
+
+     double mapWidth = _getMapWidth(bounds);
+      // Handle bounds crossing the antimeridian properly for zoom calculation
+     if (bounds.northeast.longitude < bounds.southwest.longitude) {
+         mapWidth = 360 - (bounds.southwest.longitude - bounds.northeast.longitude).abs();
+     } else {
+         mapWidth = (bounds.northeast.longitude - bounds.southwest.longitude).abs();
+     }
+
+     // Prevent invalid map width
+     if (mapWidth <= 0) mapWidth = 0.1;
+
+     // Calculate zoom level based on longitude span
+     // Formula derived from map width and pixels at zoom 0
+     // Google Maps uses a tile size of 256 pixels
+     double zoom = (log(360 * MERCATOR_RANGE / mapWidth / 256) / ln2);
+
+     return zoom.clamp(0, 22).toDouble(); // Clamp to valid zoom range and ensure double
+  }
+
+  /// Get adaptive inflation percentage based on zoom level and map size
+  double _getAdaptiveExtraPercent() {
+    // Base value from constructor
+    double adaptivePercent = extraPercent;
+    
+    // No bounds information yet, use default
+    if (_lastKnownBounds == null) return adaptivePercent;
+    
+    // Calculate map width in degrees
+    double mapWidth = _getMapWidth(_lastKnownBounds!);
+    
+    // Use the current _zoom value
+    final currentZoom = _zoom; 
+
+    // For very small map views (high zoom), increase extraPercent to ensure we get enough items
+    if (currentZoom > 14) {
+      adaptivePercent = max(adaptivePercent, 1.0);
+    }
+    // For medium zoom levels, scale based on width
+    else if (currentZoom > 10) {
+      if (mapWidth < 0.1) {
+        adaptivePercent = max(adaptivePercent, 0.8);
+      }
+    }
+    // For low zoom levels with wide view, reduce the extra percent to prevent loading too many items
+    else if (currentZoom < 6 && mapWidth > 45) {
+      adaptivePercent = min(adaptivePercent, 0.4);
+    }
+    
+    return adaptivePercent;
+  }
+  
+  /// Calculate map width in degrees
+  double _getMapWidth(LatLngBounds bounds) {
+    double width;
+    if (bounds.northeast.longitude < bounds.southwest.longitude) {
+      // Map crosses the date line
+      width = (180.0 - bounds.southwest.longitude) + (bounds.northeast.longitude + 180);
+    } else {
+      width = bounds.northeast.longitude - bounds.southwest.longitude;
+    }
+    return width.abs(); // Ensure width is positive
+  }
+  
+  /// Calculate map height in degrees
+  double _getMapHeight(LatLngBounds bounds) {
+    return (bounds.northeast.latitude - bounds.southwest.latitude).abs(); // Ensure height is positive
+  }
+  
+  /// Check if this is an ultra-wide view
+  bool _isUltraWideView(LatLngBounds bounds) {
+    double width = _getMapWidth(bounds);
+    // Ultra-wide is defined as seeing more than 90 degrees of longitude
+    return width > 90;
+  }
+  
+  /// Check if this is a very small view (high zoom)
+  bool _isSmallView(LatLngBounds bounds) {
+    double width = _getMapWidth(bounds);
+    double height = _getMapHeight(bounds);
+    // Small view is defined as seeing less than 0.05 degrees in either dimension
+    return width < 0.05 || height < 0.05;
   }
 }

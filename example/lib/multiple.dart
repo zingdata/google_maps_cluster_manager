@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_cluster_manager/google_maps_cluster_manager.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart' hide ClusterManager,Cluster;
 
 void main() => runApp(MyApp());
 
@@ -111,8 +111,8 @@ class MapSampleState extends State<MapSample> {
             _manager2.onCameraMove(position);
           },
           onCameraIdle: () {
-            _manager.updateMap();
-            _manager2.updateMap();
+            _manager.onCameraIdle();
+            _manager2.onCameraIdle();
           }),
       floatingActionButton: FloatingActionButton(
         onPressed: () {

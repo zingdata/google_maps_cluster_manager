@@ -103,7 +103,7 @@ class MapSampleState extends State<MapSample> {
             _manager.setMapId(controller.mapId);
           },
           onCameraMove: _manager.onCameraMove,
-          onCameraIdle: _manager.updateMap),
+          onCameraIdle: _manager.onCameraIdle),
       floatingActionButton: FloatingActionButton(
         onPressed: () {
           _manager.setItems(<Place>[
